@@ -1,11 +1,18 @@
 package limiter
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
 
-// UserLimiter combines a token bucket  with a daily quota
+var (
+	ErrInvalidMaxTokens  = errors.New("limiter: maxTokens must not be negative")
+	ErrInvalidRefillRate = errors.New("limiter: refillRate must be greater than 0")
+	ErrInvalidDailyLimit = errors.New("limiter: dailyLimit must not be negative")
+)
+
+// UserLimiter combines a token bucket (burst control) with a daily quota
 // (long-term usage cap) for a single user identity.
 type UserLimiter struct {
 	mu sync.Mutex
@@ -18,13 +25,22 @@ type UserLimiter struct {
 
 	// daily limit
 	dailyLimit    int
-	dailyCount    int // need to be capped at 4000
+	dailyCount    int // e.g. capped at 4000
 	lastResetTime time.Time
 }
 
 // NewUserLimiter creates a UserLimiter starting with a full bucket and a
-// fresh daily counter.
-func NewUserLimiter(maxTokens float64, refillRate float64, dailyLimit int) *UserLimiter {
+func NewUserLimiter(maxTokens float64, refillRate float64, dailyLimit int) (*UserLimiter, error) {
+	if maxTokens < 0 {
+		return nil, ErrInvalidMaxTokens
+	}
+	if refillRate <= 0 {
+		return nil, ErrInvalidRefillRate
+	}
+	if dailyLimit < 0 {
+		return nil, ErrInvalidDailyLimit
+	}
+
 	now := time.Now()
 	return &UserLimiter{
 		tokens:         maxTokens, // start full, so a new user isn't throttled immediately
@@ -35,10 +51,11 @@ func NewUserLimiter(maxTokens float64, refillRate float64, dailyLimit int) *User
 		dailyLimit:    dailyLimit,
 		dailyCount:    0,
 		lastResetTime: now,
-	}
+	}, nil
 }
 
-// Allow reports whether a request should be permitted right now
+// Allow reports whether a request should be permitted right now. It is safe
+// to call concurrently from multiple goroutines.
 func (ul *UserLimiter) Allow() bool {
 	ul.mu.Lock()
 	defer ul.mu.Unlock()
@@ -78,12 +95,51 @@ func (ul *UserLimiter) refill(now time.Time) {
 }
 
 // resetDailyIfNeeded resets the daily counter if 24 hours have passed since
-// the last reset. Must be called with mu already held.
 func (ul *UserLimiter) resetDailyIfNeeded(now time.Time) {
 	if now.Sub(ul.lastResetTime) >= 24*time.Hour {
 		ul.dailyCount = 0
 		ul.lastResetTime = now
 	}
+}
+
+// Limiter manages one UserLimiter per user identity.
+type Limiter struct {
+	mu    sync.Mutex
+	users map[string]*UserLimiter
+
+	maxTokens  float64
+	refillRate float64
+	dailyLimit int
+}
+
+// NewLimiter creates a multi-user limiter. Every user gets the same
+func NewLimiter(maxTokens, refillRate float64, dailyLimit int) (*Limiter, error) {
+		if _, err := NewUserLimiter(maxTokens, refillRate, dailyLimit); err != nil {
+		return nil, err
+	}
+
+	return &Limiter{
+		users:      make(map[string]*UserLimiter),
+		maxTokens:  maxTokens,
+		refillRate: refillRate,
+		dailyLimit: dailyLimit,
+	}, nil
+}
+
+// Allow reports whether a request from userID should be permitted right now.
+// A new UserLimiter is created on first use.
+func (l *Limiter) Allow(userID string) bool {
+	l.mu.Lock()
+	ul, exists := l.users[userID]
+	if !exists {
+		// Error ignored: config was already validated in NewLimiter, so this
+		// can't fail in practice.
+		ul, _ = NewUserLimiter(l.maxTokens, l.refillRate, l.dailyLimit)
+		l.users[userID] = ul
+	}
+	l.mu.Unlock()
+
+	return ul.Allow()
 }
 
 // Tokens returns the current token count, mainly useful for debugging/tests.
@@ -95,7 +151,6 @@ func (ul *UserLimiter) Tokens() float64 {
 }
 
 // DailyCount returns how many requests have been counted in the current
-// daily window, mainly useful for debugging/tests.
 func (ul *UserLimiter) DailyCount() int {
 	ul.mu.Lock()
 	defer ul.mu.Unlock()
