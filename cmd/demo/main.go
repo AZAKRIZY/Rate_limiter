@@ -5,7 +5,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/AZAKRIZY/Rate_limiter/internal/limiter"
+	"github.com/AZAKRIZY/Rate_limiter/pkg/limiter"
 )
 
 func main() {
