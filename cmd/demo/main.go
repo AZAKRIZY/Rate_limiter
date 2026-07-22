@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/AZAKRIZY/Rate_limiter/internal/limiter"
@@ -12,21 +13,54 @@ func main() {
 	single()
 
 	fmt.Println("\n=== Burst, mixed allow/deny ===")
-	fresh := limiter.NewUserLimiter(100, 5, 4000)
+	fresh, err := limiter.NewUserLimiter(100, 5, 4000)
+	if err != nil {
+		log.Fatal(err)
+	}
 	burst("alice", fresh, 120)
 
 	fmt.Println("\n=== All denied (empty bucket) ===")
-	empty := limiter.NewUserLimiter(0, 5, 4000)
+	empty, err := limiter.NewUserLimiter(0, 5, 4000)
+	if err != nil {
+		log.Fatal(err)
+	}
 	burst("bob", empty, 5)
 
 	fmt.Println("\n=== Concurrent requests ===")
-	shared := limiter.NewUserLimiter(100, 5, 4000)
+	shared, err := limiter.NewUserLimiter(100, 5, 4000)
+	if err != nil {
+		log.Fatal(err)
+	}
 	concurrent(shared, 20)
+
+	fmt.Println("\n=== Multi-user limiter ===")
+	multiUser()
+
+	fmt.Println("\n=== Invalid config ===")
+	invalidConfig()
 }
 
 func single() {
-	ul := limiter.NewUserLimiter(100, 5, 4000)
+	ul, err := limiter.NewUserLimiter(100, 5, 4000)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println("allowed:", ul.Allow())
+}
+
+func multiUser() {
+	l, err := limiter.NewLimiter(100, 5, 4000)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("alice allowed:", l.Allow("alice"))
+	fmt.Println("bob allowed:", l.Allow("bob"))
+	fmt.Println("alice allowed again:", l.Allow("alice"))
+}
+
+func invalidConfig() {
+	_, err := limiter.NewUserLimiter(-1, 5, 4000)
+	fmt.Println("error:", err)
 }
 
 func burst(user string, ul *limiter.UserLimiter, n int) {
